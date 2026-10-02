@@ -533,10 +533,29 @@ def post_prediction(
     trainer="nnUNetTrainer",
     plans="nnUNetPlans",
     configuration="3d_lowres",
+    fold=None,
     timeout_seconds=120,
 ):
+    """POST /predictions/predict.
+
+    fold: None/``"ensemble"`` omits the field (5-fold CV default).
+    ``"all"`` / ``"fold_all"`` sends ``fold=all`` (single fold_all model).
+    """
     if not channel_image_paths:
         raise ValueError("At least one channel image path is required.")
+
+    fold_value = None
+    if fold is not None and str(fold).strip() != "":
+        fold_norm = str(fold).strip().lower()
+        if fold_norm in ("ensemble",):
+            fold_value = None
+        elif fold_norm in ("all", "fold_all"):
+            fold_value = "all"
+        else:
+            raise ValueError(
+                f'Invalid fold={fold!r}; expected None/"ensemble" or "all".'
+            )
+
     form_data = {
         "dataset_id": model_dataset_id,
         "image_id": image_id,
@@ -545,6 +564,9 @@ def post_prediction(
         "configuration": configuration,
         "num_channels": str(len(channel_image_paths)),
     }
+    if fold_value is not None:
+        form_data["fold"] = fold_value
+
     opened = []
     try:
         files = []
@@ -614,9 +636,10 @@ def cancel_prediction_job(BASE_URL, job_id, timeout_seconds=30):
     return data if isinstance(data, dict) else {"job_id": job_id, "status": "canceled"}
 
 
-def server_has_approved_model(BASE_URL, model, timeout_seconds=30):
+def find_approved_model_entry(BASE_URL, model, timeout_seconds=30):
+    """Return the matching approved-model dict from this server, or None."""
     if not isinstance(model, dict):
-        return False
+        return None
     models = get_approved_models(BASE_URL, timeout_seconds=timeout_seconds) or []
     want = (
         model.get("dataset_id"),
@@ -634,8 +657,26 @@ def server_has_approved_model(BASE_URL, model, timeout_seconds=30):
             entry.get("configuration"),
         )
         if have == want:
-            return True
-    return False
+            return entry
+    return None
+
+
+def server_has_approved_model(
+    BASE_URL, model, timeout_seconds=30, require_fold_all=False
+):
+    """True if ``model`` is on this server's approved list.
+
+    When ``require_fold_all`` is True, the entry must also report
+    ``fold_all_available`` (Fast / single-model inference).
+    """
+    entry = find_approved_model_entry(
+        BASE_URL, model, timeout_seconds=timeout_seconds
+    )
+    if entry is None:
+        return False
+    if require_fold_all and not bool(entry.get("fold_all_available")):
+        return False
+    return True
 
 
 def download_prediction_result(BASE_URL, dataset_id, req_id, image_number, out_dir):

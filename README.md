@@ -122,12 +122,16 @@ Python picks up the changes.
 1. Expand **Prediction Tool** (requires login; a volume should be loaded —
    typically after **Fetch**).
 2. Optionally filter models, then select an **approved** model.
-3. Choose **Labels to Import** and a prediction **Server** (or
+3. Choose **Mode**:
+   - **Fast – Single Model** (`fold_all`) when the model reports
+     `fold_all_available` (default when both modes exist)
+   - **Accurate – 5-Fold Ensemble** (CV ensemble of folds 0–4)
+4. Choose **Labels to Import** and a prediction **Server** (or
    **Next Available Server** for load balancing).
-4. **Run Auto Segment**. Job status appears in tabs; when finished, a **new**
+5. **Run Auto Segment**. Job status appears in tabs; when finished, a **new**
    segmentation node is created (existing case labels are left alone) and
    Segment Editor opens on the result.
-5. Multi-channel models prompt to download the full case image set from the
+6. Multi-channel models prompt to download the full case image set from the
    logged-in server (the viewer holds only channel 0).
 
 ## Repository layout

@@ -25,6 +25,11 @@ NEXT_AVAILABLE_SERVER = "Next Available Server"
 _PREFS_PREFIX = "NnUNetDashboard/prediction"
 _logger = logging.getLogger(__name__)
 
+FOLD_MODE_ALL = "all"
+FOLD_MODE_ENSEMBLE = "ensemble"
+FOLD_LABEL_FAST = "Fast – Single Model"
+FOLD_LABEL_ACCURATE = "Accurate – 5-Fold Ensemble"
+
 
 def _short_host(url):
     parsed = urlsplit(str(url or ""))
@@ -74,6 +79,7 @@ class PredictionToolPanel:
         self._job_seq = 0
         self._restoring_prefs = False
         self._preferred_model = None
+        self._preferred_fold_mode = None
 
         self._poll_timer = qt.QTimer()
         self._poll_timer.setInterval(2000)
@@ -142,6 +148,15 @@ class PredictionToolPanel:
 
         self.channelsLabel = qt.QLabel("-")
         form.addRow("Model Channels:", self.channelsLabel)
+
+        self.foldModeCombo = qt.QComboBox()
+        self.foldModeCombo.setToolTip(
+            "Fast – Single Model: fold_all (one model trained on all cases; quicker).\n"
+            "Accurate – 5-Fold Ensemble: standard CV ensemble of folds 0–4 (slower)."
+        )
+        self.foldModeCombo.currentIndexChanged.connect(self._on_fold_mode_changed)
+        form.addRow("Mode:", self.foldModeCombo)
+        self._update_fold_mode_combo(fold_all_available=False, announce=False)
 
         labelsPanel = qt.QWidget()
         labelsLayout = qt.QVBoxLayout(labelsPanel)
@@ -217,6 +232,7 @@ class PredictionToolPanel:
         configuration = str(
             settings.value(f"{_PREFS_PREFIX}/model_configuration", "") or ""
         ).strip()
+        fold_mode = str(settings.value(f"{_PREFS_PREFIX}/fold_mode", "") or "").strip().lower()
         self._preferred_model = None
         if dataset_id:
             self._preferred_model = {
@@ -225,6 +241,9 @@ class PredictionToolPanel:
                 "plans": plans or None,
                 "configuration": configuration or None,
             }
+        self._preferred_fold_mode = (
+            fold_mode if fold_mode in (FOLD_MODE_ALL, FOLD_MODE_ENSEMBLE) else None
+        )
 
     def _persist_prefs(self):
         if self._restoring_prefs:
@@ -253,6 +272,10 @@ class PredictionToolPanel:
                     "plans": model.get("plans"),
                     "configuration": model.get("configuration"),
                 }
+            fold_mode = self._selected_fold_mode()
+            if fold_mode:
+                settings.setValue(f"{_PREFS_PREFIX}/fold_mode", fold_mode)
+                self._preferred_fold_mode = fold_mode
             settings.sync()
         except Exception as e:
             _logger.warning("Failed to persist prediction prefs: %s", e)
@@ -264,6 +287,8 @@ class PredictionToolPanel:
         self.modelFilterEdit.setEnabled(bool(connected))
         self.modelCombo.setEnabled(bool(connected))
         self.predictionServerCombo.setEnabled(bool(connected))
+        if hasattr(self, "foldModeCombo") and self.foldModeCombo is not None:
+            self.foldModeCombo.setEnabled(bool(connected))
         if connected:
             self._reload_prediction_server_combo()
             self.load_approved_models()
@@ -276,6 +301,7 @@ class PredictionToolPanel:
             self.modelCombo.blockSignals(False)
             self.channelsLabel.setText("-")
             self._clear_import_labels_list()
+            self._update_fold_mode_combo(fold_all_available=False, announce=False)
             self.refresh_context()
 
     def refresh_context(self):
@@ -466,6 +492,65 @@ class PredictionToolPanel:
         data = self.modelCombo.itemData(self._combo_current_index(self.modelCombo))
         return data if isinstance(data, dict) else None
 
+    def _selected_fold_mode(self):
+        combo = getattr(self, "foldModeCombo", None)
+        if combo is None:
+            return FOLD_MODE_ENSEMBLE
+        data = combo.itemData(self._combo_current_index(combo))
+        if data in (FOLD_MODE_ALL, FOLD_MODE_ENSEMBLE):
+            return data
+        return FOLD_MODE_ENSEMBLE
+
+    def _fold_all_available_for_selection(self):
+        if isinstance(self._model_detail, dict) and "fold_all_available" in self._model_detail:
+            return bool(self._model_detail.get("fold_all_available"))
+        model = self._selected_model()
+        if isinstance(model, dict) and "fold_all_available" in model:
+            return bool(model.get("fold_all_available"))
+        return False
+
+    def _update_fold_mode_combo(self, fold_all_available=None, announce=True):
+        combo = getattr(self, "foldModeCombo", None)
+        if combo is None:
+            return
+        if fold_all_available is None:
+            fold_all_available = self._fold_all_available_for_selection()
+
+        previous = self._selected_fold_mode() if self._combo_count(combo) > 0 else None
+        preferred = self._preferred_fold_mode
+        self._restoring_prefs = True
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            if fold_all_available:
+                combo.addItem(FOLD_LABEL_FAST, FOLD_MODE_ALL)
+            combo.addItem(FOLD_LABEL_ACCURATE, FOLD_MODE_ENSEMBLE)
+
+            want = preferred if preferred in (FOLD_MODE_ALL, FOLD_MODE_ENSEMBLE) else None
+            if want is None and fold_all_available:
+                want = FOLD_MODE_ALL
+            if want is None:
+                want = FOLD_MODE_ENSEMBLE
+            idx = combo.findData(want)
+            if idx < 0:
+                idx = 0
+            combo.setCurrentIndex(idx)
+        finally:
+            combo.blockSignals(False)
+            self._restoring_prefs = False
+
+        selected = self._selected_fold_mode()
+        if announce and previous == FOLD_MODE_ALL and selected != FOLD_MODE_ALL:
+            self._append_general(
+                "fold_all is not available for this model; "
+                "switched Mode to Accurate – 5-Fold Ensemble."
+            )
+
+    def _on_fold_mode_changed(self, _index=0):
+        if self._restoring_prefs:
+            return
+        self._persist_prefs()
+
     def _on_model_filter_changed(self, _text=""):
         self._filter_debounce_timer.start()
 
@@ -597,6 +682,7 @@ class PredictionToolPanel:
             self.modelDocsButton.setEnabled(False)
             self.channelsLabel.setText("-")
             self._clear_import_labels_list()
+            self._update_fold_mode_combo(fold_all_available=False, announce=False)
         else:
             if self._model_detail is None:
                 self._on_model_changed(self.modelCombo.currentIndex)
@@ -617,6 +703,7 @@ class PredictionToolPanel:
         if not model:
             self.channelsLabel.setText("-")
             self._clear_import_labels_list()
+            self._update_fold_mode_combo(fold_all_available=False, announce=False)
             self.refresh_context()
             return
 
@@ -624,6 +711,11 @@ class PredictionToolPanel:
         base_url = ctx.get("server_url")
         if not base_url:
             return
+
+        self._update_fold_mode_combo(
+            fold_all_available=bool(model.get("fold_all_available")),
+            announce=True,
+        )
 
         try:
             with slicer.util.tryWithErrorDisplay(
@@ -650,14 +742,28 @@ class PredictionToolPanel:
             self._populate_import_labels_list(labels, checked=True)
             docs = (detail or {}).get("docs_url") or model.get("docs_url")
             self.modelDocsButton.setEnabled(bool(docs))
+            fold_all = bool(
+                (detail or {}).get("fold_all_available", model.get("fold_all_available"))
+            )
+            self._update_fold_mode_combo(fold_all_available=fold_all, announce=True)
+            mode_label = (
+                FOLD_LABEL_FAST
+                if self._selected_fold_mode() == FOLD_MODE_ALL
+                else FOLD_LABEL_ACCURATE
+            )
             self._append_general(
                 f"Selected model channels: "
                 f"{nnunet_client.format_channel_names(channel_names)} ({n_ch}). "
-                f"Labels to import: {len(importable)}"
+                f"Labels to import: {len(importable)}. "
+                f"fold_all_available={fold_all}. Mode: {mode_label}."
             )
         except Exception as e:
             self.channelsLabel.setText("?")
             self._clear_import_labels_list()
+            self._update_fold_mode_combo(
+                fold_all_available=bool(model.get("fold_all_available")),
+                announce=True,
+            )
             self._append_general(f"Failed to fetch model detail: {e}")
         self.refresh_context()
         self._persist_prefs()
@@ -764,9 +870,12 @@ class PredictionToolPanel:
         return str(data).strip() if data else None
 
     def _pick_prediction_server(self, model, log_fn):
+        require_fold_all = self._selected_fold_mode() == FOLD_MODE_ALL
         forced_url = self._selected_prediction_server_url()
         if forced_url:
-            return self._validate_prediction_server(forced_url, model, log_fn)
+            return self._validate_prediction_server(
+                forced_url, model, log_fn, require_fold_all=require_fold_all
+            )
 
         cfg = module_settings.load_settings()
         urls = list(cfg.get("server_urls") or [])
@@ -778,7 +887,9 @@ class PredictionToolPanel:
         for url in urls:
             host = _short_host(url)
             try:
-                load = self._probe_prediction_server(url, model, log_fn)
+                load = self._probe_prediction_server(
+                    url, model, log_fn, require_fold_all=require_fold_all
+                )
             except Exception as e:
                 log_fn(f"Skip {host}: {e}")
                 continue
@@ -797,6 +908,12 @@ class PredictionToolPanel:
             candidates.append((wait_n, jobs_ahead_n, url, load))
 
         if not candidates:
+            if require_fold_all:
+                raise RuntimeError(
+                    "No configured server has this model with fold_all available "
+                    "and reported queue load. Try Accurate – 5-Fold Ensemble, "
+                    "or pick a server that has fold_all weights."
+                )
             raise RuntimeError(
                 "No configured server both has the selected model and reported queue load."
             )
@@ -806,24 +923,42 @@ class PredictionToolPanel:
         log_fn(f"Selected prediction server (next available): {_short_host(chosen)}")
         return chosen
 
-    def _validate_prediction_server(self, url, model, log_fn):
+    def _validate_prediction_server(self, url, model, log_fn, require_fold_all=False):
         host = _short_host(url)
         log_fn(f"Using selected prediction server: {host}")
         load = self._probe_prediction_server(
-            url, model, log_fn, require_inferencing=True
+            url,
+            model,
+            log_fn,
+            require_inferencing=True,
+            require_fold_all=require_fold_all,
         )
         if load is None:
+            extra = (
+                ", or fold_all weights missing" if require_fold_all else ""
+            )
             raise RuntimeError(
                 f"Selected server {_short_host(url)} cannot run this model "
-                "(missing model, inferencing disabled, or queue load unavailable)."
+                f"(missing model, inferencing disabled{extra}, "
+                "or queue load unavailable)."
             )
         return url
 
-    def _probe_prediction_server(self, url, model, log_fn, require_inferencing=True):
+    def _probe_prediction_server(
+        self, url, model, log_fn, require_inferencing=True, require_fold_all=False
+    ):
         host = _short_host(url)
         try:
-            if not nnunet_client.server_has_approved_model(url, model):
-                log_fn(f"Skip {host}: selected model not available.")
+            if not nnunet_client.server_has_approved_model(
+                url, model, require_fold_all=require_fold_all
+            ):
+                if require_fold_all:
+                    log_fn(
+                        f"Skip {host}: selected model not available "
+                        "or fold_all weights missing."
+                    )
+                else:
+                    log_fn(f"Skip {host}: selected model not available.")
                 return None
         except Exception as e:
             log_fn(f"Skip {host}: could not list approved models ({e}).")
@@ -845,6 +980,7 @@ class PredictionToolPanel:
         log_fn(
             f"{host}: model OK, jobs_ahead={jobs_ahead}, "
             f"estimated_wait_s={wait}, inferencing_enabled={inferencing}"
+            + (", fold_all required" if require_fold_all else "")
         )
         if require_inferencing and inferencing is False:
             log_fn(f"Skip {host}: inferencing disabled.")
@@ -975,6 +1111,10 @@ class PredictionToolPanel:
             use_downloaded_case = True
 
         labels = selected_labels if selected_labels else all_labels
+        fold_mode = self._selected_fold_mode()
+        fold_label = (
+            FOLD_LABEL_FAST if fold_mode == FOLD_MODE_ALL else FOLD_LABEL_ACCURATE
+        )
 
         self._job_seq += 1
         job_uid = uuid.uuid4().hex
@@ -999,6 +1139,7 @@ class PredictionToolPanel:
             "case_base_url": case_base_url,
             "model_dataset_id": model.get("dataset_id"),
             "labels": labels,
+            "fold": fold_mode,
             "out_dir": None,
             "submitted_at": time.monotonic(),
             "model": dict(model),
@@ -1009,6 +1150,7 @@ class PredictionToolPanel:
         def log(msg):
             self._append_job(job, msg)
 
+        log(f"Mode: {fold_label} (fold={fold_mode}).")
         log(
             f"Will import "
             f"{len(selected_labels) if selected_labels else len(_importable_label_items(labels))} "
@@ -1058,6 +1200,7 @@ class PredictionToolPanel:
                 trainer=model.get("trainer", "nnUNetTrainer"),
                 plans=model.get("plans", "nnUNetPlans"),
                 configuration=model.get("configuration", "3d_lowres"),
+                fold=fold_mode if fold_mode == FOLD_MODE_ALL else None,
             )
         except Exception as e:
             job["state"] = "failed"
